@@ -1,0 +1,9 @@
+CREATE TABLE IF NOT EXISTS customers (
+    id         INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    name       TEXT NOT NULL,
+    email      TEXT NOT NULL UNIQUE,
+    phone      TEXT,
+    active     BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
