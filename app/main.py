@@ -15,6 +15,11 @@ class CustomerIn(BaseModel):
 
 @app.get("/health")
 def health():
+    try:
+        with get_connection() as conn:
+            conn.execute("SELECT 1")
+    except psycopg.Error:
+        raise HTTPException(status_code=503, detail="Database unavailable")
     return {"status": "ok"}
 
 
