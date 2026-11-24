@@ -64,3 +64,20 @@ def deactivate_customer(customer_id: int):
 @app.post("/customers/{customer_id}/activate")
 def activate_customer(customer_id: int):
     return set_active(customer_id, True)
+
+
+@app.put("/customers/{customer_id}")
+def update_customer(customer_id: int, customer: CustomerIn):
+    try:
+        with get_connection() as conn:
+            row = conn.execute(
+                "UPDATE customers SET name = %s, email = %s, phone = %s, updated_at = now() "
+                "WHERE id = %s "
+                "RETURNING id, name, email, phone, active, created_at, updated_at",
+                (customer.name, customer.email, customer.phone, customer_id),
+            ).fetchone()
+    except psycopg.errors.UniqueViolation:
+        raise HTTPException(status_code=409, detail="Email already exists")
+    if row is None:
+        raise HTTPException(status_code=404, detail="Customer not found")
+    return row

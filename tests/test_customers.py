@@ -61,3 +61,31 @@ def test_activate_brings_customer_back():
 def test_deactivate_unknown_customer_returns_404():
     response = client.post("/customers/999/deactivate")
     assert response.status_code == 404
+
+
+def test_update_customer():
+    ali = client.post("/customers", json={"name": "Ali Hassan", "email": "ali@example.com"}).json()
+
+    response = client.put(
+        f"/customers/{ali['id']}",
+        json={"name": "Ali H.", "email": "ali@example.com", "phone": "555-0199"},
+    )
+    assert response.status_code == 200
+    assert response.json()["name"] == "Ali H."
+    assert response.json()["phone"] == "555-0199"
+
+
+def test_update_to_taken_email_is_rejected():
+    ali = client.post("/customers", json={"name": "Ali Hassan", "email": "ali@example.com"}).json()
+    client.post("/customers", json={"name": "Mara", "email": "mara@example.com"})
+
+    response = client.put(
+        f"/customers/{ali['id']}",
+        json={"name": "Ali Hassan", "email": "mara@example.com"},
+    )
+    assert response.status_code == 409
+
+
+def test_update_unknown_customer_returns_404():
+    response = client.put("/customers/999", json={"name": "X", "email": "x@example.com"})
+    assert response.status_code == 404
