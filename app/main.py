@@ -30,7 +30,37 @@ def add_customer(customer: CustomerIn):
             ).fetchone()
     except psycopg.errors.UniqueViolation:
         raise HTTPException(status_code=409, detail="Email already exists")
-    return {
-        "id": row[0], "name": row[1], "email": row[2],
-        "phone": row[3], "active": row[4], "created_at": row[5],
-    }
+    return row
+
+
+@app.get("/customers")
+def list_customers():
+    with get_connection() as conn:
+        rows = conn.execute(
+            "SELECT id, name, email, phone, active, created_at "
+            "FROM customers WHERE active = TRUE ORDER BY id"
+        ).fetchall()
+    return rows
+
+
+def set_active(customer_id: int, active: bool):
+    with get_connection() as conn:
+        row = conn.execute(
+            "UPDATE customers SET active = %s, updated_at = now() "
+            "WHERE id = %s "
+            "RETURNING id, name, email, phone, active, created_at, updated_at",
+            (active, customer_id),
+        ).fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Customer not found")
+    return row
+
+
+@app.post("/customers/{customer_id}/deactivate")
+def deactivate_customer(customer_id: int):
+    return set_active(customer_id, False)
+
+
+@app.post("/customers/{customer_id}/activate")
+def activate_customer(customer_id: int):
+    return set_active(customer_id, True)
