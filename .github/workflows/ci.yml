@@ -210,3 +210,43 @@ jobs:
       - name: Close the database door
         if: always()
         run: az postgres flexible-server firewall-rule delete --resource-group rg-customers-test --server-name pg-cust-marwan-denmarkeast --name ci-runner --yes
+
+  build-integration:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fetch the code
+        uses: actions/checkout@v5
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: Publish the integration for Windows
+        run: dotnet publish integration -c Release -r win-x64 --self-contained true -o pkg/app
+
+      - name: Add the deploy script
+        run: cp deploy/deploy-vm.ps1 pkg/
+
+      - name: Save the package
+        uses: actions/upload-artifact@v5
+        with:
+          name: integration-package
+          path: pkg
+
+  deploy-vm:
+    needs: [build-integration, deploy-production]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: [self-hosted, windows, vm]
+    environment: vm
+
+    steps:
+      - name: Download the package
+        uses: actions/download-artifact@v5
+        with:
+          name: integration-package
+          path: package
+
+      - name: Deploy to the VM
+        shell: powershell
+        run: .\package\deploy-vm.ps1 -PackageDir "$env:GITHUB_WORKSPACE\package\app"
