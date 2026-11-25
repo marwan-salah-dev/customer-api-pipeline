@@ -67,6 +67,9 @@ jobs:
         with:
           name: api-package
 
+      - name: Unpack the package
+        run: unzip api.zip -d package
+
       - name: Log in to Azure
         uses: azure/login@v2
         with:
@@ -82,7 +85,7 @@ jobs:
       - name: Update the tables
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
-        run: psql "$DATABASE_URL" -f db/schema.sql
+        run: psql "$DATABASE_URL" -f package/db/schema.sql
 
       - name: Deploy to the Web App
         uses: azure/webapps-deploy@v3
