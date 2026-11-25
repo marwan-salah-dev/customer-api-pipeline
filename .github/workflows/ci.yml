@@ -193,19 +193,36 @@ jobs:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
         run: psql "$DATABASE_URL" -f package/db/schema.sql
 
-      - name: Deploy to the Web App
+      - name: Deploy to the staging slot
         uses: azure/webapps-deploy@v3
         with:
           app-name: app-customers-marwan-prod
+          slot-name: staging
           package: api.zip
 
-      - name: Check the app is healthy
+      - name: Check the staging slot is healthy
         run: |
           for i in $(seq 1 20); do
-            if curl -fsS https://app-customers-marwan-prod.azurewebsites.net/health; then exit 0; fi
+            if curl -fsS https://app-customers-marwan-prod-staging.azurewebsites.net/health; then exit 0; fi
             sleep 15
           done
           exit 1
+
+      - name: Swap staging into production
+        id: swap
+        run: az webapp deployment slot swap --resource-group rg-customers-prod --name app-customers-marwan-prod --slot staging --target-slot production
+
+      - name: Check production is healthy
+        run: |
+          for i in $(seq 1 12); do
+            if curl -fsS https://app-customers-marwan-prod.azurewebsites.net/health; then exit 0; fi
+            sleep 10
+          done
+          exit 1
+
+      - name: Roll back by swapping again
+        if: failure() && steps.swap.outcome == 'success'
+        run: az webapp deployment slot swap --resource-group rg-customers-prod --name app-customers-marwan-prod --slot staging --target-slot production
 
       - name: Close the database door
         if: always()
