@@ -1,3 +1,9 @@
+"""Tests for the customer endpoints: add, list, update, deactivate and activate,
+including the error cases (409 duplicate email, 404 unknown id, 422 bad body).
+
+Each test starts with an empty table (see conftest.py).
+"""
+
 from fastapi.testclient import TestClient
 from app.main import app
 

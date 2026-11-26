@@ -1,21 +1,42 @@
+# CI/CD pipeline for the Customer API (Web Apps) and the integration EXE (private VM).
+#
+# Flow on a push to main:
+#   build ──> deploy-test ──> deploy-uat* ──> deploy-production* ──┐
+#   build-integration ─────────────────────────────────────────────┴──> deploy-vm*
+#   (* waits for approval: required reviewers are set on the GitHub environment)
+#
+# On a pull request or a push to any other branch, only build and
+# build-integration run: code is tested and packaged, never deployed.
+#
+# Access to Azure uses OIDC (no stored password): each environment has its own
+# managed identity whose federated credential trusts only this repo + environment.
+# Approvals and branch rules live in repo Settings > Environments, not in this
+# file, so editing the YAML cannot remove them.
+
 name: CI
 
 on:
-  push:
+  push:          # every branch
   pull_request:
 
 jobs:
+  # ---------------------------------------------------------------------------
+  # Test and package the API. Runs on every push and pull request.
+  # ---------------------------------------------------------------------------
   build:
     runs-on: ubuntu-latest
 
+    # Throwaway PostgreSQL started next to the job so the tests use a real
+    # database. It only exists for this run.
     services:
       postgres:
         image: postgres:17
         env:
-          POSTGRES_PASSWORD: postgres
+          POSTGRES_PASSWORD: postgres   # throwaway container, not a real secret
           POSTGRES_DB: customers_test
         ports:
           - 5432:5432
+        # Steps wait until the database reports ready.
         options: >-
           --health-cmd "pg_isready -U postgres"
           --health-interval 5s
@@ -23,6 +44,7 @@ jobs:
           --health-retries 10
 
     env:
+      # Ends in _test, which tests/conftest.py requires before it will run.
       DATABASE_URL: postgresql://postgres:postgres@localhost:5432/customers_test
 
     steps:
@@ -43,6 +65,8 @@ jobs:
       - name: Run the tests
         run: python -m pytest
 
+      # Build once, deploy many: this zip is the exact package every
+      # environment receives, so production runs what was tested.
       - name: Package the app
         run: zip -r api.zip app db requirements.txt -x "*/__pycache__/*"
 
@@ -52,13 +76,18 @@ jobs:
           name: api-package
           path: api.zip
 
+  # ---------------------------------------------------------------------------
+  # Deploy to test. Automatic (no approval).
+  # ---------------------------------------------------------------------------
   deploy-test:
     needs: build
+    # Only a real push to main deploys. Feature branches and pull requests
+    # skip every deploy job.
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     runs-on: ubuntu-latest
-    environment: test
+    environment: test           # picks this environment's variables and secret
     permissions:
-      id-token: write
+      id-token: write           # lets the job request an OIDC token for azure/login
       contents: read
 
     steps:
@@ -67,9 +96,12 @@ jobs:
         with:
           name: api-package
 
+      # The job has no checkout, so db/schema.sql comes from the package.
       - name: Unpack the package
         run: unzip api.zip -d package
 
+      # IDs only (not secrets). The federated credential on the identity is
+      # what makes this login work without a password.
       - name: Log in to Azure
         uses: azure/login@v2
         with:
@@ -77,11 +109,15 @@ jobs:
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
           subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
 
+      # The database firewall only lets in listed IPs. Allow this runner's IP
+      # for the duration of the job (closed again in the last step).
+      # The one database server lives in rg-customers-test for all environments.
       - name: Open the database door for this runner
         run: |
           IP=$(curl -s https://api.ipify.org)
           az postgres flexible-server firewall-rule create --resource-group rg-customers-test --server-name pg-cust-marwan-denmarkeast --name ci-runner --start-ip-address $IP --end-ip-address $IP
 
+      # Bring the database up to date before the new code goes live.
       - name: Update the tables
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
@@ -93,6 +129,8 @@ jobs:
           app-name: app-customers-marwan-test
           package: api.zip
 
+      # "Uploaded" is not "working": call /health (app up + database reachable)
+      # up to 20 times, 15 s apart, while the app starts. Fail the job otherwise.
       - name: Check the app is healthy
         run: |
           for i in $(seq 1 20); do
@@ -101,10 +139,14 @@ jobs:
           done
           exit 1
 
+      # always(): runs even if an earlier step failed, so the door never stays open.
       - name: Close the database door
         if: always()
         run: az postgres flexible-server firewall-rule delete --resource-group rg-customers-test --server-name pg-cust-marwan-denmarkeast --name ci-runner --yes
 
+  # ---------------------------------------------------------------------------
+  # Deploy to UAT. Same steps as test; waits for approval (uat environment).
+  # ---------------------------------------------------------------------------
   deploy-uat:
     needs: deploy-test
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
@@ -158,6 +200,10 @@ jobs:
         if: always()
         run: az postgres flexible-server firewall-rule delete --resource-group rg-customers-test --server-name pg-cust-marwan-denmarkeast --name ci-runner --yes
 
+  # ---------------------------------------------------------------------------
+  # Deploy to production through a staging slot. Waits for approval.
+  # Deploy to staging, check it, swap it live, check again, swap back on failure.
+  # ---------------------------------------------------------------------------
   deploy-production:
     needs: deploy-uat
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
@@ -193,6 +239,7 @@ jobs:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
         run: psql "$DATABASE_URL" -f package/db/schema.sql
 
+      # The live site is untouched here: the new version goes to the staging slot.
       - name: Deploy to the staging slot
         uses: azure/webapps-deploy@v3
         with:
@@ -208,6 +255,8 @@ jobs:
           done
           exit 1
 
+      # Staging and production exchange places. Azure warms staging first,
+      # so there is no downtime. The old version is now in staging.
       - name: Swap staging into production
         id: swap
         run: az webapp deployment slot swap --resource-group rg-customers-prod --name app-customers-marwan-prod --slot staging --target-slot production
@@ -220,6 +269,8 @@ jobs:
           done
           exit 1
 
+      # Rollback: only if something failed AFTER the swap happened. If it failed
+      # before the swap, production was never touched and there is nothing to undo.
       - name: Roll back by swapping again
         if: failure() && steps.swap.outcome == 'success'
         run: az webapp deployment slot swap --resource-group rg-customers-prod --name app-customers-marwan-prod --slot staging --target-slot production
@@ -228,6 +279,10 @@ jobs:
         if: always()
         run: az postgres flexible-server firewall-rule delete --resource-group rg-customers-test --server-name pg-cust-marwan-denmarkeast --name ci-runner --yes
 
+  # ---------------------------------------------------------------------------
+  # Build the .NET integration EXE (stands in for the team's integrations).
+  # Runs on every push and pull request, in parallel with build.
+  # ---------------------------------------------------------------------------
   build-integration:
     runs-on: ubuntu-latest
     steps:
@@ -239,9 +294,12 @@ jobs:
         with:
           dotnet-version: "8.0.x"
 
+      # Release build for 64-bit Windows with the .NET runtime bundled inside,
+      # so the VM needs nothing installed. publish runs restore and build itself.
       - name: Publish the integration for Windows
         run: dotnet publish integration -c Release -r win-x64 --self-contained true -o pkg/app
 
+      # Ship the deploy script inside the package so the VM job needs no checkout.
       - name: Add the deploy script
         run: cp deploy/deploy-vm.ps1 pkg/
 
@@ -251,6 +309,12 @@ jobs:
           name: integration-package
           path: pkg
 
+  # ---------------------------------------------------------------------------
+  # Deploy the EXE to the private VM. Waits for approval (vm environment).
+  # The VM has no public IP, so GitHub cannot reach in: a self-hosted runner
+  # installed on the VM polls GitHub (outbound only, via a NAT gateway) and
+  # picks up jobs with these labels.
+  # ---------------------------------------------------------------------------
   deploy-vm:
     needs: [build-integration, deploy-production]
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
@@ -264,6 +328,7 @@ jobs:
           name: integration-package
           path: package
 
+      # Stop, back up, copy, start, health check, roll back on failure.
       - name: Deploy to the VM
         shell: powershell
         run: .\package\deploy-vm.ps1 -PackageDir "$env:GITHUB_WORKSPACE\package\app"
