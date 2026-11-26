@@ -1,3 +1,5 @@
+"""Tests for GET /health (database reachable -> 200)."""
+
 from fastapi.testclient import TestClient
 from app.main import app
 
